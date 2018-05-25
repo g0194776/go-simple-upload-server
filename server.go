@@ -20,20 +20,22 @@ type Server struct {
 	DocumentRoot string
 	// MaxUploadSize limits the size of the uploaded content, specified with "byte".
 	MaxUploadSize int64
-	SecureToken   string
+	PostToken     string
+	GetToken      string
 }
 
 // NewServer creates a new simple-upload server.
-func NewServer(documentRoot string, maxUploadSize int64, token string) Server {
+func NewServer(documentRoot string, maxUploadSize int64, token, getToken string) Server {
 	return Server{
 		DocumentRoot:  documentRoot,
 		MaxUploadSize: maxUploadSize,
-		SecureToken:   token,
+		PostToken:     token,
+		GetToken:      getToken,
 	}
 }
 
 func (s Server) handleGet(w http.ResponseWriter, r *http.Request) {
-	re := regexp.MustCompile(`^/files/([^/]+)$`)
+	re := regexp.MustCompile(`^/files/.*`)
 	if !re.MatchString(r.URL.Path) {
 		w.WriteHeader(http.StatusNotFound)
 		writeError(w, fmt.Errorf("\"%s\" is not found", r.URL.Path))
@@ -50,6 +52,7 @@ func (s Server) handlePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	sp := r.Header.Get("storage-path")
 	defer srcFile.Close()
 	logger.Debug(info)
 	size, err := getSize(srcFile)
@@ -78,7 +81,27 @@ func (s Server) handlePost(w http.ResponseWriter, r *http.Request) {
 		filename = fmt.Sprintf("%x", sha1.Sum(body))
 	}
 
-	dstPath := path.Join(s.DocumentRoot, filename)
+	var dstPath string
+	if sp == "" {
+		dstPath = path.Join(s.DocumentRoot, filename)
+	} else {
+		dstPath = path.Join(s.DocumentRoot, sp, filename)
+		if _, err := os.Stat(path.Join(s.DocumentRoot, sp)); err != nil {
+			if !os.IsNotExist(err) {
+				logger.WithError(err).Error("failed to access dest folder: ", path.Join(s.DocumentRoot, sp))
+				w.WriteHeader(http.StatusInternalServerError)
+				writeError(w, err)
+				return
+			}
+			err = os.MkdirAll(path.Join(s.DocumentRoot, sp), 0777)
+			if err != nil {
+				logger.WithError(err).Error("failed to create dest folder: ", path.Join(s.DocumentRoot, sp), "error: ", err.Error())
+				w.WriteHeader(http.StatusInternalServerError)
+				writeError(w, err)
+				return
+			}
+		}
+	}
 	dstFile, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		logger.WithError(err).WithField("path", dstPath).Error("failed to open the file")
@@ -115,7 +138,7 @@ func (s Server) handlePost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s Server) handlePut(w http.ResponseWriter, r *http.Request) {
-	re := regexp.MustCompile(`^/files/([^/]+)$`)
+	re := regexp.MustCompile(`^/files/.*`)
 	matches := re.FindStringSubmatch(r.URL.Path)
 	if matches == nil {
 		logger.WithField("path", r.URL.Path).Info("invalid path")
@@ -123,7 +146,7 @@ func (s Server) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, fmt.Errorf("\"%s\" is not found", r.URL.Path))
 		return
 	}
-	targetPath := path.Join(s.DocumentRoot, matches[1])
+	targetPath := path.Join(s.DocumentRoot, strings.Replace(matches[0], "/files/", "", -1))
 	file, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		logger.WithError(err).WithField("path", targetPath).Error("failed to open the file")
@@ -183,7 +206,12 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token = r.Form.Get("token")
 	}
-	if token != s.SecureToken {
+	if (r.Method == http.MethodPost || r.Method == http.MethodPut) && token != s.PostToken {
+		w.WriteHeader(http.StatusUnauthorized)
+		writeError(w, fmt.Errorf("authentication required"))
+		return
+	}
+	if r.Method == http.MethodGet && token != s.GetToken {
 		w.WriteHeader(http.StatusUnauthorized)
 		writeError(w, fmt.Errorf("authentication required"))
 		return
