@@ -211,7 +211,7 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, fmt.Errorf("authentication required"))
 		return
 	}
-	if token != s.GetToken {
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && token != s.GetToken {
 		w.WriteHeader(http.StatusUnauthorized)
 		writeError(w, fmt.Errorf("authentication required"))
 		return
